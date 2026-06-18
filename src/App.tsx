@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { useMemo, useState } from "react";
 import "./App.css";
 
 import type {
@@ -11,7 +10,7 @@ import type {
 
 type Theme = "dark" | "light";
 type MatchStatus = "pending" | "finished";
-type BracketSide = "winners" | "losers" | "grandFinal";
+type BracketSide = "winners" | "losers" | "grandFinal" | "grandFinalReset";
 
 interface TournamentMatch {
   id: string;
@@ -37,125 +36,15 @@ interface TournamentState {
   winnersChampion?: Team;
   losersChampion?: Team;
   grandFinal?: TournamentMatch;
-  grandFinalLosersBo3Won?: boolean;
+  grandFinalReset?: TournamentMatch;
   champion?: Team;
 }
-
-interface SavedAppState {
-  players: Player[];
-  theme: Theme;
-  tournament: TournamentState | null;
-}
-
-type SupabaseStatus =
-  | "loading"
-  | "online"
-  | "saving"
-  | "error"
-  | "local";
-
-interface TournamentStateRow {
-  id: string;
-  state: SavedAppState;
-  updated_at?: string;
-}
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const supabasePublishableKey = import.meta.env
-  .VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
-
-const supabase =
-  supabaseUrl && supabasePublishableKey
-    ? createClient(supabaseUrl, supabasePublishableKey)
-    : null;
-
-const SUPABASE_TOURNAMENT_ID =
-  (import.meta.env.VITE_SUPABASE_TOURNAMENT_ID as string | undefined) ?? "main";
 
 const WINS_NEEDED = 2;
 
 const participantOptions = [
   4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
 ];
-
-const STORAGE_KEY = "ciegaslin-tournament-state-v1";
-
-function loadSavedAppState(): SavedAppState | null {
-  try {
-    if (typeof window === "undefined") return null;
-
-    const savedState = window.localStorage.getItem(STORAGE_KEY);
-    if (!savedState) return null;
-
-    return JSON.parse(savedState) as SavedAppState;
-  } catch {
-    return null;
-  }
-}
-
-function saveAppState(state: SavedAppState) {
-  try {
-    if (typeof window === "undefined") return;
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Si el navegador bloquea localStorage, la app sigue funcionando,
-    // simplemente sin guardado automático.
-  }
-}
-
-function clearSavedAppState() {
-  try {
-    if (typeof window === "undefined") return;
-
-    window.localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    // No hacemos nada: borrar el guardado no debe romper la app.
-  }
-}
-
-async function loadSavedAppStateFromSupabase(): Promise<SavedAppState | null> {
-  if (!supabase) return null;
-
-  const { data, error } = await supabase
-    .from("tournament_states")
-    .select("state")
-    .eq("id", SUPABASE_TOURNAMENT_ID)
-    .maybeSingle<TournamentStateRow>();
-
-  if (error) {
-    throw error;
-  }
-
-  return data?.state ?? null;
-}
-
-async function saveAppStateToSupabase(state: SavedAppState) {
-  if (!supabase) return;
-
-  const { error } = await supabase.from("tournament_states").upsert({
-    id: SUPABASE_TOURNAMENT_ID,
-    state,
-    updated_at: new Date().toISOString(),
-  });
-
-  if (error) {
-    throw error;
-  }
-}
-
-async function clearSavedAppStateFromSupabase() {
-  if (!supabase) return;
-
-  const { error } = await supabase
-    .from("tournament_states")
-    .delete()
-    .eq("id", SUPABASE_TOURNAMENT_ID);
-
-  if (error) {
-    throw error;
-  }
-}
 
 function createId() {
   return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
@@ -386,6 +275,9 @@ function cloneTournament(tournament: TournamentState): TournamentState {
     grandFinal: tournament.grandFinal
       ? { ...tournament.grandFinal }
       : undefined,
+    grandFinalReset: tournament.grandFinalReset
+      ? { ...tournament.grandFinalReset }
+      : undefined,
   };
 }
 
@@ -398,6 +290,51 @@ function hasUnfinishedMatches(rounds: TournamentMatch[][]) {
 function getQueuedWinners(tournament: TournamentState) {
   return Object.values(tournament.winnersQueues).flat();
 }
+
+function isRoundFinished(round?: TournamentMatch[]) {
+  return !round || round.every((match) => match.status === "finished");
+}
+
+function promoteLonelyWinnersTeams(tournament: TournamentState) {
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    const hasPendingWinnersMatches = hasUnfinishedMatches(tournament.winnersRounds);
+    const queuedWinners = getQueuedWinners(tournament);
+
+    if (!hasPendingWinnersMatches && queuedWinners.length <= 1) {
+      return;
+    }
+
+    const queueIndexes = Object.keys(tournament.winnersQueues)
+      .map(Number)
+      .sort((left, right) => left - right);
+
+    for (const queueIndex of queueIndexes) {
+      const queue = tournament.winnersQueues[queueIndex] ?? [];
+
+      if (queue.length !== 1) continue;
+
+      const previousRound = tournament.winnersRounds[queueIndex - 1];
+      const currentRound = tournament.winnersRounds[queueIndex];
+
+      if (!isRoundFinished(previousRound) || !isRoundFinished(currentRound)) {
+        continue;
+      }
+
+      const [team] = queue;
+
+      tournament.winnersQueues[queueIndex] = [];
+      addToWinnersQueue(tournament, queueIndex + 1, team);
+
+      changed = true;
+      break;
+    }
+  }
+}
+
 
 function getLosersTargetRoundIndex(tournament: TournamentState) {
   const lastRoundIndex = tournament.losersRounds.length - 1;
@@ -521,6 +458,7 @@ function maybeCreateGrandFinal(tournament: TournamentState) {
 }
 
 function normalizeTournament(tournament: TournamentState) {
+  promoteLonelyWinnersTeams(tournament);
   maybeSetWinnersChampion(tournament);
   maybeSetLosersChampion(tournament);
   maybeCreateGrandFinal(tournament);
@@ -541,6 +479,7 @@ function findMatch(
   }
 
   if (tournament.grandFinal?.id === matchId) return tournament.grandFinal;
+  if (tournament.grandFinalReset?.id === matchId) return tournament.grandFinalReset;
 
   return undefined;
 }
@@ -586,41 +525,27 @@ function completeMatch(tournament: TournamentState, match: TournamentMatch) {
   if (match.bracketSide === "grandFinal") {
     const winnerComesFromWinners =
       tournament.winnersChampion?.id === winner.id;
-    const winnerComesFromLosers =
-      tournament.losersChampion?.id === winner.id;
 
-    // Si Losers ya ganó un BO3 antes, este BO3 ya decide el torneo.
-    if (tournament.grandFinalLosersBo3Won) {
-      tournament.champion = winner;
-      normalizeTournament(tournament);
-      return;
-    }
-
-    // El equipo que llega por Winners solo necesita ganar 1 BO3.
     if (winnerComesFromWinners) {
       tournament.champion = winner;
-      normalizeTournament(tournament);
-      return;
-    }
-
-    // El equipo que llega por Losers necesita ganar primero un BO3 para
-    // resetear el bracket. No creamos otro cuadro: marcamos el checkbox
-    // y reutilizamos este mismo match para el segundo BO3.
-    if (
-      winnerComesFromLosers &&
+    } else if (
       tournament.winnersChampion &&
-      tournament.losersChampion
+      tournament.losersChampion &&
+      !tournament.grandFinalReset
     ) {
-      tournament.grandFinalLosersBo3Won = true;
-      match.status = "pending";
-      match.winnerId = undefined;
-      match.loserId = undefined;
-      match.topScore = 0;
-      match.bottomScore = 0;
-
-      normalizeTournament(tournament);
-      return;
+      tournament.grandFinalReset = createMatch(
+        "grandFinalReset",
+        0,
+        0,
+        tournament.winnersChampion,
+        tournament.losersChampion,
+        "Reset Final"
+      );
     }
+  }
+
+  if (match.bracketSide === "grandFinalReset") {
+    tournament.champion = winner;
   }
 
   normalizeTournament(tournament);
@@ -655,6 +580,11 @@ function undoCompletedMatch(tournament: TournamentState, match: TournamentMatch)
   }
 
   if (match.bracketSide === "grandFinal") {
+    tournament.champion = undefined;
+    tournament.grandFinalReset = undefined;
+  }
+
+  if (match.bracketSide === "grandFinalReset") {
     tournament.champion = undefined;
   }
 }
@@ -725,89 +655,9 @@ function removeTeamFromLosersFuture(tournament: TournamentState, team: Team) {
 }
 
 export default function App() {
-  const [savedAppState] = useState<SavedAppState | null>(() =>
-    loadSavedAppState()
-  );
-
-  const [players, setPlayers] = useState<Player[]>(() =>
-    savedAppState?.players?.length ? savedAppState.players : createPlayers(4)
-  );
-  const [theme, setTheme] = useState<Theme>(
-    () => savedAppState?.theme ?? "light"
-  );
-  const [tournament, setTournament] = useState<TournamentState | null>(
-    () => savedAppState?.tournament ?? null
-  );
-  const [remoteLoaded, setRemoteLoaded] = useState(() => !supabase);
-  const [supabaseStatus, setSupabaseStatus] = useState<SupabaseStatus>(() =>
-    supabase ? "loading" : "local"
-  );
-
-  useEffect(() => {
-    if (!supabase) return;
-
-    let cancelled = false;
-
-    async function loadRemoteState() {
-      try {
-        const remoteState = await loadSavedAppStateFromSupabase();
-
-        if (cancelled) return;
-
-        if (remoteState) {
-          setPlayers(
-            remoteState.players?.length ? remoteState.players : createPlayers(4)
-          );
-          setTheme(remoteState.theme ?? "light");
-          setTournament(remoteState.tournament ?? null);
-          saveAppState(remoteState);
-        }
-
-        setRemoteLoaded(true);
-        setSupabaseStatus("online");
-      } catch (error) {
-        console.error("Error cargando Supabase", error);
-
-        if (!cancelled) {
-          setRemoteLoaded(true);
-          setSupabaseStatus("error");
-        }
-      }
-    }
-
-    void loadRemoteState();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const state = {
-      players,
-      theme,
-      tournament,
-    };
-
-    saveAppState(state);
-
-    if (!remoteLoaded || !supabase) return;
-
-    const timeoutId = window.setTimeout(() => {
-      setSupabaseStatus("saving");
-
-      void saveAppStateToSupabase(state)
-        .then(() => {
-          setSupabaseStatus("online");
-        })
-        .catch((error) => {
-          console.error("Error guardando Supabase", error);
-          setSupabaseStatus("error");
-        });
-    }, 400);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [players, theme, tournament, remoteLoaded]);
+  const [players, setPlayers] = useState<Player[]>(() => createPlayers(4));
+  const [theme, setTheme] = useState<Theme>("light");
+  const [tournament, setTournament] = useState<TournamentState | null>(null);
 
   const stats = useMemo(() => {
     return {
@@ -849,7 +699,7 @@ export default function App() {
   }
 
   function handleDraw() {
-    if (!validation.isValid || tournament) return;
+    if (!validation.isValid) return;
 
     const generatedTeams = generateTeams(players);
     const initialTournament = createInitialTournament(generatedTeams);
@@ -886,11 +736,6 @@ export default function App() {
   }
 
   function resetPlayers() {
-    clearSavedAppState();
-    clearSavedAppStateFromSupabase().catch((error) => {
-      console.error("Error borrando Supabase", error);
-      setSupabaseStatus("error");
-    });
     setPlayers(createPlayers(4));
     setTournament(null);
   }
@@ -1105,13 +950,6 @@ export default function App() {
       <section className="hero">
         <div className="top-bar">
           <span className="eyebrow">Ciegas Lin</span>
-          <span className={`autosave-pill status-${supabaseStatus}`}>
-            {supabaseStatus === "loading" && "Cargando Supabase"}
-            {supabaseStatus === "saving" && "Guardando en Supabase"}
-            {supabaseStatus === "online" && "Guardado en Supabase"}
-            {supabaseStatus === "error" && "Error Supabase · local activo"}
-            {supabaseStatus === "local" && "Guardado local"}
-          </span>
 
           <button className="theme-toggle" onClick={toggleTheme}>
             {theme === "light" ? "Modo oscuro" : "Modo claro"}
@@ -1214,14 +1052,9 @@ export default function App() {
             <button
               className="primary-btn"
               onClick={handleDraw}
-              disabled={!validation.isValid || Boolean(tournament)}
-              title={
-                tournament
-                  ? "El sorteo ya está hecho. Pulsa Reiniciar para empezar otro."
-                  : undefined
-              }
+              disabled={!validation.isValid}
             >
-              {tournament ? "Equipos ya sorteados" : "Sortear equipos"}
+              Sortear equipos
             </button>
             <button className="secondary-btn" onClick={resetPlayers}>
               Reiniciar
@@ -1289,22 +1122,6 @@ export default function App() {
                   </p>
                 </div>
 
-                {tournament.grandFinal && (
-                  <label className="grand-final-reset-check">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(tournament.grandFinalLosersBo3Won)}
-                      readOnly
-                    />
-                    <span>
-                      Losers ya ganó 1 BO3
-                      {tournament.grandFinalLosersBo3Won
-                        ? " — ahora este BO3 decide el torneo"
-                        : " — todavía necesita ganar 2 BO3"}
-                    </span>
-                  </label>
-                )}
-
                 <div className="grand-final-grid">
                   {tournament.grandFinal ? (
                     renderMatch(tournament.grandFinal)
@@ -1313,6 +1130,20 @@ export default function App() {
                       <strong>Gran Final pendiente</strong>
                       <span>Esperando campeón de Winners y campeón de Losers.</span>
                     </div>
+                  )}
+
+                  {tournament.grandFinalReset && (
+                    <>
+                      <div className="reset-info">
+                        <strong>Reset de bracket</strong>
+                        <p>
+                          El campeón de Losers ganó la primera final. Ahora este BO3
+                          decide el torneo.
+                        </p>
+                      </div>
+
+                      {renderMatch(tournament.grandFinalReset)}
+                    </>
                   )}
                 </div>
               </section>
