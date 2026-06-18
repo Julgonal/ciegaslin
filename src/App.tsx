@@ -1149,13 +1149,12 @@ export default function App() {
     <main className="app" data-theme={theme}>
       <section className="hero">
         <div className="top-bar">
-          <span className="eyebrow">Ciegas Lin</span>
+        <h1 className="app-title">Ciegas Lin</h1>
           <span className={`autosave-pill status-${supabaseStatus}`}>
             {supabaseStatus === "loading" && "Cargando Supabase"}
             {supabaseStatus === "saving" && "Guardando en Supabase"}
             {supabaseStatus === "online" && "Guardado en Supabase"}
             {supabaseStatus === "error" && "Error Supabase · local activo"}
-            {supabaseStatus === "local" && "Guardado local"}
           </span>
 
           <button className="theme-toggle" onClick={toggleTheme}>
